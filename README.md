@@ -8,6 +8,7 @@ Quick notes and commands collected while building the image/video steganography 
 - Adaptive LSB with Canny-based bit selection for higher capacity with low distortion.
 - AES-256 + PBKDF2 encryption for both image and video payloads.
 - Video stego: text-in-video, file-in-video, encrypted variants, and selective-frame mode.
+- NEW FEATURE: time encode, check decode time
 
 ## Build
 ```bash
