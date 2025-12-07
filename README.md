@@ -81,3 +81,13 @@ Notes:
 ```bash
 sudo apt-get install python3-tk
 ```
+
+## OUTPUT 
+CANNOT DECODE
+<img width="1232" height="819" alt="image" src="https://github.com/user-attachments/assets/f6987b0d-c6a7-4ed3-b888-90662da213c4" />
+
+DECODE /
+<img width="1280" height="800" alt="image" src="https://github.com/user-attachments/assets/632a3c55-591b-41e8-91d9-2918d1488e67" />
+
+
+
