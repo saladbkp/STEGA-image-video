@@ -1,6 +1,8 @@
+import os
 import subprocess
 import threading
 import re
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -8,6 +10,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 BASE_DIR = Path(__file__).resolve().parent
 STEGO_BIN = BASE_DIR / "stego"
+DECODE_AFTER_ATTR = "user.decode_after"
 
 
 def append_log(widget: scrolledtext.ScrolledText, text: str) -> None:
@@ -100,6 +103,77 @@ def run_stego_capture(args):
     result = _run_cmd(cmd)
     output = (result.stdout or "") + (result.stderr or "")
     return result.returncode == 0, output
+
+
+def parse_decode_after(value: str):
+    value = value.strip()
+    if not value:
+        return None, None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt), None
+        except ValueError:
+            continue
+    return None, "Use format YYYY-MM-DD HH:MM or YYYY-MM-DD HH:MM:SS"
+
+
+def enforce_decode_after(value: str) -> bool:
+    """Return True if decode is allowed for the given value."""
+    decode_at, err = parse_decode_after(value)
+    if err:
+        messagebox.showerror("Invalid decode time", err)
+        return False
+    if decode_at and datetime.now() < decode_at:
+        messagebox.showwarning("Too early", f"Decoding allowed after {decode_at}")
+        return False
+    return True
+
+
+def validate_decode_after_input(value: str) -> bool:
+    _, err = parse_decode_after(value)
+    if err:
+        messagebox.showerror("Invalid decode time", err)
+        return False
+    return True
+
+
+def store_decode_after_metadata(path: str, value: str, log_widget=None) -> None:
+    value = value.strip()
+    if not value:
+        return
+    try:
+        os.setxattr(path, DECODE_AFTER_ATTR, value.encode())
+        if log_widget:
+            append_log(log_widget, f"[decode-after] saved '{value}' to metadata")
+    except Exception as exc:  # pragma: no cover - best-effort
+        if log_widget:
+            append_log(log_widget, f"[warn] could not save decode-after metadata: {exc}")
+
+
+def read_decode_after_metadata(path: str, log_widget=None) -> str:
+    try:
+        raw = os.getxattr(path, DECODE_AFTER_ATTR)
+        val = raw.decode(errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        val = val.strip()
+        if val and log_widget:
+            append_log(log_widget, f"[decode-after] found stored time '{val}'")
+        return val
+    except OSError:
+        return ""
+    except Exception as exc:  # pragma: no cover - best-effort
+        if log_widget:
+            append_log(log_widget, f"[warn] could not read decode-after metadata: {exc}")
+        return ""
+
+
+def resolve_decode_after_value(path: str, user_value: str, log_widget=None) -> str:
+    meta_val = read_decode_after_metadata(path, log_widget)
+    user_val = user_value.strip()
+    if meta_val:
+        if user_val and user_val != meta_val and log_widget:
+            append_log(log_widget, "[decode-after] using stored metadata value; user entry ignored")
+        return meta_val
+    return user_val
 
 
 def parse_image_metrics(cover, stego):
@@ -238,6 +312,7 @@ def build_image_section(root, log_widget):
     stego_var = tk.StringVar()
     message_file_var = tk.StringVar()
     password_var = tk.StringVar()
+    decode_after_var = tk.StringVar()
     metrics_var = tk.StringVar(value="Metrics: —")
 
     tk.Label(frame, text="Cover image").grid(row=0, column=0, sticky="w", padx=4, pady=2)
@@ -259,11 +334,16 @@ def build_image_section(root, log_widget):
     tk.Label(frame, text="Password (optional for encryption)").grid(row=4, column=0, sticky="w", padx=4, pady=2)
     tk.Entry(frame, textvariable=password_var, show="*").grid(row=4, column=1, sticky="ew", padx=4, pady=2)
 
+    tk.Label(frame, text="Decode after (YYYY-MM-DD HH:MM)").grid(row=5, column=0, sticky="w", padx=4, pady=2)
+    tk.Entry(frame, textvariable=decode_after_var).grid(row=5, column=1, sticky="ew", padx=4, pady=2)
+
     def do_embed():
         cover = cover_var.get().strip()
         stego = stego_var.get().strip()
         if not cover or not stego:
             messagebox.showwarning("Missing paths", "Pick a cover image and an output path.")
+            return
+        if not validate_decode_after_input(decode_after_var.get()):
             return
 
         message_file = message_file_var.get().strip()
@@ -284,6 +364,7 @@ def build_image_section(root, log_widget):
             args = ["adaptive_embed", cover, stego, payload_arg]
 
         if run_stego(args, log_widget):
+            store_decode_after_metadata(stego, decode_after_var.get(), log_widget)
             ok, metrics_text = parse_image_metrics(cover, stego)
             if ok:
                 metrics_var.set(f"Metrics: {metrics_text}")
@@ -298,6 +379,9 @@ def build_image_section(root, log_widget):
         if not stego:
             messagebox.showwarning("Missing stego", "Pick a stego image to extract from.")
             return
+        decode_after_value = resolve_decode_after_value(stego, decode_after_var.get(), log_widget)
+        if not enforce_decode_after(decode_after_value):
+            return
         password = password_var.get().strip()
         if password:
             args = ["adaptive_decrypt_extract", stego, password]
@@ -307,10 +391,10 @@ def build_image_section(root, log_widget):
         if run_stego(args, log_widget):
             messagebox.showinfo("Done", "Extraction finished. Check the log for the message.")
 
-    tk.Button(frame, text="Embed", command=do_embed).grid(row=5, column=1, sticky="e", padx=4, pady=4)
-    tk.Button(frame, text="Extract", command=do_extract).grid(row=5, column=2, sticky="w", padx=4, pady=4)
+    tk.Button(frame, text="Embed", command=do_embed).grid(row=6, column=1, sticky="e", padx=4, pady=4)
+    tk.Button(frame, text="Extract", command=do_extract).grid(row=6, column=2, sticky="w", padx=4, pady=4)
 
-    tk.Label(frame, textvariable=metrics_var, anchor="w").grid(row=6, column=0, columnspan=3, sticky="ew", padx=4, pady=4)
+    tk.Label(frame, textvariable=metrics_var, anchor="w").grid(row=7, column=0, columnspan=3, sticky="ew", padx=4, pady=4)
 
     frame.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
 
@@ -326,6 +410,7 @@ def build_video_text_section(root, log_widget):
     stego_var = tk.StringVar()
     msg_file_var = tk.StringVar()
     password_var = tk.StringVar()
+    decode_after_var = tk.StringVar()
     metrics_btn = None  # set after creation
 
     tk.Label(frame, text="Cover video").grid(row=0, column=0, sticky="w", padx=4, pady=2)
@@ -347,11 +432,16 @@ def build_video_text_section(root, log_widget):
     tk.Label(frame, text="Password (optional)").grid(row=4, column=0, sticky="w", padx=4, pady=2)
     tk.Entry(frame, textvariable=password_var, show="*").grid(row=4, column=1, sticky="ew", padx=4, pady=2)
 
+    tk.Label(frame, text="Decode after (YYYY-MM-DD HH:MM)").grid(row=5, column=0, sticky="w", padx=4, pady=2)
+    tk.Entry(frame, textvariable=decode_after_var).grid(row=5, column=1, sticky="ew", padx=4, pady=2)
+
     def do_embed():
         cover = cover_var.get().strip()
         stego = stego_var.get().strip()
         if not cover or not stego:
             messagebox.showwarning("Missing paths", "Pick a cover video and an output path.")
+            return
+        if not validate_decode_after_input(decode_after_var.get()):
             return
 
         msg_file = msg_file_var.get().strip()
@@ -382,6 +472,7 @@ def build_video_text_section(root, log_widget):
             if metrics_btn:
                 metrics_btn.configure(state="normal")
             if success:
+                store_decode_after_metadata(stego, decode_after_var.get(), log_widget)
                 messagebox.showinfo("Done", "Embedding finished.")
             else:
                 messagebox.showerror("Failed", "Embedding failed. See log.")
@@ -392,6 +483,9 @@ def build_video_text_section(root, log_widget):
         stego = stego_var.get().strip()
         if not stego:
             messagebox.showwarning("Missing stego", "Pick a stego video to extract from.")
+            return
+        decode_after_value = resolve_decode_after_value(stego, decode_after_var.get(), log_widget)
+        if not enforce_decode_after(decode_after_value):
             return
         password = password_var.get().strip()
         if password:
@@ -417,11 +511,11 @@ def build_video_text_section(root, log_widget):
         run_stego_stream(args, log_widget, progress_var, on_done)
 
     embed_btn = tk.Button(frame, text="Embed text", command=do_embed)
-    embed_btn.grid(row=5, column=1, sticky="e", padx=4, pady=4)
+    embed_btn.grid(row=6, column=1, sticky="e", padx=4, pady=4)
     extract_btn = tk.Button(frame, text="Extract text", command=do_extract)
-    extract_btn.grid(row=5, column=2, sticky="w", padx=4, pady=4)
+    extract_btn.grid(row=6, column=2, sticky="w", padx=4, pady=4)
     progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100)
-    progress_bar.grid(row=6, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
+    progress_bar.grid(row=7, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
 
     def run_metrics():
         cover = cover_var.get().strip()
@@ -443,8 +537,8 @@ def build_video_text_section(root, log_widget):
         run_video_metrics_async(cover, stego, log_widget, metrics_var, progress_bar, progress_var, on_complete=done)
 
     metrics_btn = tk.Button(frame, text="Run metrics", command=run_metrics)
-    metrics_btn.grid(row=7, column=2, sticky="e", padx=4, pady=4)
-    tk.Label(frame, textvariable=metrics_var, anchor="w").grid(row=7, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
+    metrics_btn.grid(row=8, column=2, sticky="e", padx=4, pady=4)
+    tk.Label(frame, textvariable=metrics_var, anchor="w").grid(row=8, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
 
     # keep references for async updates
     frame._progress_bar = progress_bar  # type: ignore
@@ -466,6 +560,7 @@ def build_video_file_section(root, log_widget):
     secret_var = tk.StringVar()
     output_var = tk.StringVar()
     password_var = tk.StringVar()
+    decode_after_var = tk.StringVar()
     metrics_btn = None  # set after creation
 
     tk.Label(frame, text="Cover video").grid(row=0, column=0, sticky="w", padx=4, pady=2)
@@ -487,12 +582,17 @@ def build_video_file_section(root, log_widget):
     tk.Label(frame, text="Password (optional)").grid(row=4, column=0, sticky="w", padx=4, pady=2)
     tk.Entry(frame, textvariable=password_var, show="*").grid(row=4, column=1, sticky="ew", padx=4, pady=2)
 
+    tk.Label(frame, text="Decode after (YYYY-MM-DD HH:MM)").grid(row=5, column=0, sticky="w", padx=4, pady=2)
+    tk.Entry(frame, textvariable=decode_after_var).grid(row=5, column=1, sticky="ew", padx=4, pady=2)
+
     def do_embed():
         cover = cover_var.get().strip()
         stego = stego_var.get().strip()
         secret = secret_var.get().strip()
         if not cover or not stego or not secret:
             messagebox.showwarning("Missing inputs", "Pick cover video, output stego path, and secret file.")
+            return
+        if not validate_decode_after_input(decode_after_var.get()):
             return
         password = password_var.get().strip()
         if password:
@@ -511,6 +611,7 @@ def build_video_file_section(root, log_widget):
             if metrics_btn:
                 metrics_btn.configure(state="normal")
             if success:
+                store_decode_after_metadata(stego, decode_after_var.get(), log_widget)
                 messagebox.showinfo("Done", "Embedding finished.")
             else:
                 messagebox.showerror("Failed", "Embedding failed. See log.")
@@ -522,6 +623,9 @@ def build_video_file_section(root, log_widget):
         output = output_var.get().strip()
         if not stego or not output:
             messagebox.showwarning("Missing inputs", "Pick stego video and an output file path.")
+            return
+        decode_after_value = resolve_decode_after_value(stego, decode_after_var.get(), log_widget)
+        if not enforce_decode_after(decode_after_value):
             return
         password = password_var.get().strip()
         if password:
@@ -546,12 +650,12 @@ def build_video_file_section(root, log_widget):
         run_stego_stream(args, log_widget, progress_var, on_done)
 
     embed_btn = tk.Button(frame, text="Embed file", command=do_embed)
-    embed_btn.grid(row=5, column=1, sticky="e", padx=4, pady=4)
+    embed_btn.grid(row=6, column=1, sticky="e", padx=4, pady=4)
     extract_btn = tk.Button(frame, text="Extract file", command=do_extract)
-    extract_btn.grid(row=5, column=2, sticky="w", padx=4, pady=4)
+    extract_btn.grid(row=6, column=2, sticky="w", padx=4, pady=4)
     progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100)
-    progress_bar.grid(row=6, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
-    tk.Label(frame, textvariable=metrics_var, anchor="w").grid(row=7, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
+    progress_bar.grid(row=7, column=0, columnspan=3, sticky="ew", padx=4, pady=2)
+    tk.Label(frame, textvariable=metrics_var, anchor="w").grid(row=8, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
 
     def run_metrics():
         cover = cover_var.get().strip()
@@ -573,7 +677,7 @@ def build_video_file_section(root, log_widget):
         run_video_metrics_async(cover, stego, log_widget, metrics_var, progress_bar, progress_var, on_complete=done)
 
     metrics_btn = tk.Button(frame, text="Run metrics", command=run_metrics)
-    metrics_btn.grid(row=7, column=2, sticky="e", padx=4, pady=4)
+    metrics_btn.grid(row=8, column=2, sticky="e", padx=4, pady=4)
 
     frame._progress_bar = progress_bar  # type: ignore
     frame._progress_var = progress_var  # type: ignore
